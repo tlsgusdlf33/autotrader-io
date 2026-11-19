@@ -1,0 +1,793 @@
+# ⚠️⚠️ 이 파일은 비공개 저장소 tlsgusdlf33/autotrader 의
+#      .github/workflows/main.yml **사본**이다. 고칠 때는 **양쪽 다** 고쳐야
+#      한다. 한쪽만 고치면 어느 쪽에서 돌렸느냐에 따라 결과가 달라진다.
+#
+# ⚠️ 왜 사본인가 — 비공개 저장소의 워크플로는 공개 저장소에서 **부를 수 없다**
+#    (workflow was not found). 그래서 부르지 않고 복사해 둔다.
+#
+# ⚠️ 여기에 비밀은 없다. 빌드 순서뿐이고, 소스·서명키·비밀번호는 전부
+#    비공개 저장소에서 토큰(AUTOTRADER_TOKEN)으로 받아온다. 이 파일을
+#    복사해 가도 토큰이 없으면 첫 단계에서 막힌다.
+name: Build APK
+
+# ⚠️ 이 저장소는 **비공개**라 Actions 분(分)이 한도가 있고, 실제로 다 썼다
+#    (2026-11-18 빌드가 단계 하나 못 돌고 죽었다). 그래서 공개 저장소
+#    tlsgusdlf33.github.io 가 이 워크플로를 **불러서** 돌린다 — 공개
+#    저장소의 Actions 는 무료·무제한이고, 소스와 결과물은 여기(비공개)에
+#    그대로 남는다.
+# ⚠️ 그래서 아래 두 가지가 꼭 필요하다.
+#    · 소스 체크아웃과 릴리스는 **이 저장소**를 집어줘야 한다. 불려 갔을 때
+#      github.repository 는 부른 쪽(공개 저장소)을 가리키기 때문이다.
+#    · 그 권한은 AUTOTRADER_TOKEN 비밀값으로 들어온다. 여기서 직접 돌 때는
+#      기본 토큰으로 떨어지게 둔다.
+on:
+  workflow_dispatch:
+  schedule:
+    # 한국시간 평일 새벽 6시 10분.
+    - cron: '10 21 * * 0-4'
+
+env:
+  SRC_REPO: tlsgusdlf33/autotrader
+  #: gh 명령이 모두 이 저장소를 보게 한다(릴리스가 공개 저장소로 새지 않게).
+  GH_REPO: tlsgusdlf33/autotrader
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    # 릴리스를 만들려면 저장소 쓰기 권한이 필요하다
+    permissions:
+      contents: write
+
+    env:
+      GRADLE_OPTS: -Xmx5g -Dorg.gradle.daemon=false
+
+    steps:
+      - name: 소스 가져오기
+        uses: actions/checkout@v4
+        with:
+          # ⚠️ 공개 저장소가 불렀을 때 기본값은 **부른 쪽**이다. 여기를
+          #    비우면 엉뚱한 저장소를 받아 "AutoTrader.zip 이 없습니다" 로
+          #    죽는다.
+          repository: ${{ env.SRC_REPO }}
+          # 여기서 직접 밀었을 때는 그 가지를, 불려 왔을 때는 main 을.
+          ref: ${{ github.repository == 'tlsgusdlf33/autotrader' && github.ref || 'main' }}
+          token: ${{ secrets.AUTOTRADER_TOKEN || github.token }}
+
+      - name: 압축 풀기
+        run: |
+          set -e
+          if [ ! -f AutoTrader.zip ]; then
+            echo "::error::AutoTrader.zip 이 저장소에 없습니다."
+            exit 1
+          fi
+          mkdir -p src
+          unzip -q AutoTrader.zip -d src
+          if [ ! -f src/settings.gradle.kts ]; then
+            inner=$(find src -maxdepth 2 -name settings.gradle.kts | head -1)
+            if [ -z "$inner" ]; then
+              echo "::error::settings.gradle.kts 를 찾을 수 없습니다."
+              find src -maxdepth 2 | head -30
+              exit 1
+            fi
+            mv "$(dirname "$inner")" src_fixed
+            rm -rf src && mv src_fixed src
+          fi
+          echo "-- 풀린 구조 --"
+          ls -la src
+          test -f src/app/build.gradle.kts && echo "app 폴더 확인" || (echo "::error::app 폴더가 없습니다"; exit 1)
+
+      # ⚠️ 그래들을 돌리기 전에 **먼저** 본다. 코틀린은 블록 주석이 중첩돼서
+      #    (자바와 다르다) 주석 안에 슬래시+별표가 들어가면 거기서 새 주석이
+      #    열리고 파일 끝까지 닫히지 않는다. 그러면 컴파일 오류가 **엉뚱한
+      #    줄**을 가리켜서 원인을 찾느라 빌드를 몇 번 더 날린다. 실제로 겪었다.
+      #    이 검사는 1초면 끝나고, 틀린 줄을 바로 집어준다.
+      - name: 코틀린 주석·괄호 확인
+        run: python3 tools/kt_syntax_check.py src/app/src/main/java
+
+      - name: 자바 17 준비
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 주인 코드 심기
+        env:
+          OWNER_CODE: ${{ secrets.OWNER_CODE || env.FILE_OWNER_CODE }}
+        run: |
+          set -e
+          STR=src/app/src/main/res/values/strings.xml
+
+          # ── 주인 코드 ──────────────────────────────────────────────
+          # ⚠️ 원문은 앱에 넣지 않는다. **해시만** 심는다. APK 를 뜯어도
+          #    코드를 알 수 없고, 코드를 모르면 앱이 열리지 않는다.
+          if [ -z "$OWNER_CODE" ]; then
+            echo "::warning::OWNER_CODE 비밀값이 없어 **잠금 없이** 빌드합니다. 누구나 설치해서 쓸 수 있습니다."
+          else
+            if [ ${#OWNER_CODE} -lt 12 ]; then
+              echo "::error::OWNER_CODE 가 너무 짧습니다(${#OWNER_CODE}자). 찍어서 맞힐 수 있습니다 — 20자 이상으로 해주세요."
+              exit 1
+            fi
+            HASH=$(printf '%s' "$OWNER_CODE" | sha256sum | cut -d' ' -f1)
+            sed -i "s|<string name=\"owner_code_hash\"></string>|<string name=\"owner_code_hash\">$HASH</string>|" "$STR"
+            echo "주인 코드 잠금 켜짐 (해시 앞 8자리: ${HASH:0:8}…)"
+          fi
+
+      - name: 파이썬 3.11 준비
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 구글이 레거시 tools 패키지를 SDK 저장소에서 내려서,
+      # 기본값 그대로 두면 여기서 빌드가 멈춘다. 필요한 것만 지정한다.
+      - name: 안드로이드 SDK 준비
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Gradle 준비
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      # ⚠️ 서명키는 **비공개 저장소 안의 파일**로도 둘 수 있다.
+      #    빌드가 공개 저장소에서 돌 때(한도 때문에 그렇게 한다), 공개 쪽
+      #    Secrets 에는 토큰 하나만 두고 서명키는 비공개 저장소를 떠나지
+      #    않게 하려는 것이다. 체크아웃이 이미 비공개 저장소를 통째로
+      #    받아왔으므로 파일은 디스크에 있다 — 따로 받아올 게 없다.
+      # ⚠️ 비밀값(Secrets)이 있으면 **그쪽이 먼저**다. 지금 쓰던 방식이
+      #    그대로 돌아가게 둔다.
+      - name: 비공개 저장소의 서명키 파일 읽기
+        id: keyfile
+        run: |
+          set -e
+          D=secrets
+          if [ -f "$D/signal.jks.b64" ]; then
+            {
+              echo "SIGNAL_KEYSTORE_BASE64<<__EOF__"
+              tr -d '\r\n' < "$D/signal.jks.b64"
+              echo
+              echo "__EOF__"
+            } >> "$GITHUB_ENV"
+            echo "::add-mask::$(cat "$D/signal.key.pw" 2>/dev/null | tr -d '\r\n')" || true
+            echo "비공개 저장소의 서명키 파일을 읽었습니다."
+          fi
+          # 비밀번호·별칭·주인코드도 같은 자리에서 읽는다. 로그에 찍히지
+          # 않도록 add-mask 를 **값을 쓰기 전에** 건다.
+          for f in signal.key.pw:FILE_SIGNAL_PW signal.key.alias:FILE_SIGNAL_ALIAS owner.code:FILE_OWNER_CODE; do
+            name="${f%%:*}"; var="${f##*:}"
+            if [ -f "$D/$name" ]; then
+              v=$(tr -d '\r\n' < "$D/$name")
+              echo "::add-mask::$v"
+              echo "$var=$v" >> "$GITHUB_ENV"
+            fi
+          done
+
+      - name: 서명 키 준비 (비밀값이 있으면 그것을 쓴다)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          set -e
+          # ⚠️ 저장소의 autotrader.jks 는 누구나 꺼낼 수 있어 **비밀이 아니다.**
+          #    비밀값을 넣어두면 그 키로 덮어써서 진짜 비밀 키로 서명한다.
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > src/app/autotrader.jks
+            echo "비밀값의 서명 키로 교체했습니다."
+          else
+            echo "::warning::KEYSTORE_BASE64 비밀값이 없어 **저장소에 공개된 키**로 서명합니다. 누구나 같은 서명의 앱을 만들 수 있습니다."
+          fi
+
+      - name: 서명 키 확인
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          set -e
+          # ⚠️ 이 단계가 이 워크플로에서 가장 중요하다.
+          # 안드로이드는 '같은 키로 서명된 APK'만 기존 앱 위에 덮어 설치하게 해준다.
+          # gradle 이 자동으로 만드는 debug 키는 빌드 기계마다 새로 생기는데,
+          # 여기는 매번 새 기계라서 빌드마다 서명이 달라졌다. 그래서 새 APK 를
+          # 깔려면 앱을 지워야 했고, 지우면 앱 폴더가 통째로 날아가
+          # API 키도 거래 기록(어떤 매매법으로 샀는지)도 전부 사라졌다.
+          # 저장소에 함께 둔 고정 키로 서명하면 그냥 덮어 설치된다.
+          if [ ! -f src/app/autotrader.jks ]; then
+            echo "::error::app/autotrader.jks 가 없습니다. 이 파일이 없으면 빌드할 때마다 서명이 달라져서, 새 APK 를 깔 때 앱을 지워야 하고 API 키·거래 기록이 사라집니다. 저장소에 함께 올려주세요(.gitignore 의 *.jks 에 걸리지 않게 !app/autotrader.jks 예외가 들어있습니다)."
+            exit 1
+          fi
+          echo "서명 키 지문 — 빌드마다 이 값이 같아야 덮어 설치가 됩니다:"
+          keytool -list -v -keystore src/app/autotrader.jks -storepass "${KEYSTORE_PASSWORD:-autotrader}" | grep "SHA256:"
+
+      - name: 서명 지문 심기 (변조 감지용)
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          set -e
+          # ⚠️ 반드시 '서명 키 준비' **뒤에** 와야 한다. 앞에 두면 비밀값으로
+          #    키를 바꿨을 때 **옛 키의 지문**이 심겨서, 앱이 스스로를
+          #    '변조됨'으로 보고 열리지 않는다.
+          STR=src/app/src/main/res/values/strings.xml
+          FP=$(keytool -list -v -keystore src/app/autotrader.jks -storepass "${KEYSTORE_PASSWORD:-autotrader}" 2>/dev/null \
+               | grep -m1 "SHA256:" | sed 's/.*SHA256: *//' | tr -d ': \r' | tr 'A-Z' 'a-z')
+          if [ ${#FP} -eq 64 ]; then
+            sed -i "s|<string name=\"expected_signature\"></string>|<string name=\"expected_signature\">$FP</string>|" "$STR"
+            echo "서명 지문 심음: ${FP:0:16}…"
+          else
+            echo "::warning::서명 지문을 못 읽었습니다 — 변조 검사 없이 빌드합니다."
+          fi
+
+      - name: APK 빌드
+        working-directory: src
+        env:
+          # ⚠️ 덮어 설치가 되려면 versionCode 가 이전보다 작으면 안 된다.
+          # 깃허브 실행 번호는 빌드할 때마다 1씩 커지므로 그대로 쓴다.
+          APP_VERSION_CODE: ${{ github.run_number }}
+          APP_VERSION_NAME: 1.0.${{ github.run_number }}
+          # 비밀값이 없으면 gradle 쪽 기본값("autotrader")이 쓰인다
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
+        run: gradle assembleDebug --stacktrace --no-daemon
+
+      - name: 결과 확인
+        run: ls -lh src/app/build/outputs/apk/debug/
+
+      - name: APK 내려받기용으로 올리기
+        # ⚠️ 여기서 실패해도 빌드를 멈추지 않는다. 저장소를 비공개로 돌린 뒤
+        # 아티팩트 보관 용량(무료 500MB)이 금방 차는데, 그 때문에 **폰이 받아가는
+        # 릴리스 발행까지 건너뛰어** 업데이트가 끊겼다(run #96, #101). 릴리스는
+        # 아티팩트 용량과 무관하므로, 올리기가 실패해도 그쪽은 계속 가야 한다.
+        continue-on-error: true
+        # ⚠️ 공개 저장소에서 돌 때는 **올리지 않는다.** 공개 저장소의
+        #    artifact 는 링크만 알면 누구나 내려받는다. 서명된 AAB 가
+        #    그렇게 새면 안 된다. 결과물은 어차피 비공개 저장소의 릴리스로
+        #    올라가므로, 여기서 빠져도 받는 데는 지장이 없다.
+        if: github.repository == 'tlsgusdlf33/autotrader'
+        uses: actions/upload-artifact@v4
+        with:
+          name: autotrader-apk
+          path: src/app/build/outputs/apk/debug/*.apk
+          # 보관 기간을 짧게 둔다 — 쌓이면 용량이 차서 위 문제가 다시 난다.
+          # 오래 두고 쓸 파일은 릴리스에 있다.
+          retention-days: 3
+
+      # ── 자동 업데이트용 릴리스 발행 ─────────────────────────────────
+      # ⚠️ 폰이 이 릴리스를 보고 스스로 업데이트한다.
+      # 주소를 고정하려고 'latest' 태그 하나를 계속 덮어쓴다. 그러면 앱은
+      #   https://github.com/<계정>/<저장소>/releases/latest/download/update.json
+      # 이라는 **변하지 않는 주소**만 알면 되고, GitHub API 호출 한도에도
+      # 걸리지 않는다(API 를 안 쓰고 파일만 받는다).
+      #
+      # ⚠️ main 에서만 발행한다. 작업 브랜치에서 빌드할 때마다 릴리스가 바뀌면
+      # 폰이 검증 안 된 코드를 받아간다.
+      - name: 업데이트 정보 만들기
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        env:
+          GH_TOKEN: ${{ secrets.AUTOTRADER_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          mkdir -p release
+          # 엔진 zip 은 앱의 자동 업데이트에 필요하다 — 코드만 들어 있고
+          # 그것만으로는 실행되지 않는다.
+          cp src/app/src/main/assets/engines/kis.zip release/
+          cp src/app/src/main/assets/engines/kiwoom.zip release/
+          cp src/app/src/main/assets/engines/upbit.zip release/
+          cp src/app/src/main/assets/engines/flow.zip release/
+          # ⚠️ 투자 비서(8792). 빠뜨리면 앱이 업데이트를 받아도 새 탭이 안 생긴다.
+          cp src/app/src/main/assets/engines/assist.zip release/
+
+          # ── 설치용 APK ─────────────────────────────────────────
+          # ⚠️ 예전에는 APK 를 릴리스에 올리지 않았다. **공개** 저장소의 릴리스는
+          #    로그인 없이 누구나 받을 수 있기 때문이다. 지금은 저장소가 비공개라
+          #    릴리스 파일도 로그인해야 받을 수 있으므로 올려둔다.
+          # ⚠️ 그리고 아티팩트만 믿을 수 없다 — 보관 용량(무료 500MB)이 차면
+          #    **아무것도** 올라가지 않아서 받을 길이 아예 없어진다(run #96~#112에서
+          #    실제로 그랬다). 릴리스 저장 공간은 그 용량과 무관하다.
+          # ⚠️ 저장소를 다시 공개로 돌리면 이 줄이 저절로 꺼진다. 못 알아내면
+          #    '공개'로 보고 올리지 않는다 — 틀렸을 때 덜 위험한 쪽이다.
+          PRIV="${{ github.event.repository.private }}"
+          if [ -z "$PRIV" ]; then
+            PRIV=$(gh api "repos/${{ env.SRC_REPO }}" --jq .private 2>/dev/null || echo "")
+          fi
+          if [ "$PRIV" = "true" ]; then
+            cp src/app/build/outputs/apk/debug/*.apk release/autotrader.apk
+            echo "설치용 APK 도 릴리스에 올립니다 (비공개 저장소라 로그인해야 받습니다)"
+          else
+            echo "::warning::저장소가 공개 상태로 보여 APK 는 릴리스에 올리지 않습니다 — 아무나 받아갈 수 있습니다."
+          fi
+
+          sha() { sha256sum "release/$1" | cut -d' ' -f1; }
+
+          # ── APK 자동 업데이트 ─────────────────────────────────
+          # update.json 에 "apk" 항목이 있으면 앱이 새 APK 를 백그라운드로 받아둔 뒤
+          # 알림을 띄우고, 한 번 누르면 설치된다. 설치 그 자체는 안드로이드가 반드시
+          # 사용자 확인을 받게 되어 있어서 탭 한 번은 어쩔 수 없다.
+          # 항목이 없으면 앱은 APK 를 건너뛰고 엔진(매매 로직)만 받는다 — 화면·서비스
+          # (코틀린) 쪽을 고친 날은 그래서 폰에 반영이 안 됐다.
+          # ⚠️ release/autotrader.apk 가 없을 때(저장소가 공개로 보일 때) 이 항목을
+          #    넣으면 앱이 없는 파일을 6시간마다 받으려 하므로, 파일이 있을 때만 넣는다.
+          APK_JSON=""
+          if [ -f release/autotrader.apk ]; then
+            APK_JSON="
+            \"apk\": { \"name\": \"autotrader.apk\", \"sha256\": \"$(sha autotrader.apk)\" },"
+            echo "APK 자동 업데이트 항목을 update.json 에 넣습니다"
+          else
+            echo "::warning::release/autotrader.apk 가 없어 APK 자동 업데이트 항목은 넣지 않습니다 — 엔진 업데이트만 동작합니다."
+          fi
+
+          # ⚠️ engines.bundle_id 는 versionCode 와 같은 값이다. 앱은 '내 APK 의
+          # versionCode 보다 큰 번들이면 새 엔진 코드'라고 판단한다. 두 값이
+          # 어긋나면 이미 들어있는 코드를 계속 다시 받는다.
+          cat > release/update.json <<JSON
+          {
+            "version_code": ${{ github.run_number }},
+            "version_name": "1.0.${{ github.run_number }}",
+            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "commit": "${{ github.sha }}",$APK_JSON
+            "engines": {
+              "bundle_id": ${{ github.run_number }},
+              "files": {
+                "kis":    { "name": "kis.zip",    "sha256": "$(sha kis.zip)" },
+                "kiwoom": { "name": "kiwoom.zip", "sha256": "$(sha kiwoom.zip)" },
+                "upbit":  { "name": "upbit.zip",  "sha256": "$(sha upbit.zip)" },
+                "flow":   { "name": "flow.zip",   "sha256": "$(sha flow.zip)" },
+                "assist": { "name": "assist.zip", "sha256": "$(sha assist.zip)" }
+              }
+            }
+          }
+          JSON
+          echo "── update.json ──"
+          cat release/update.json
+
+      - name: 릴리스에 올리기 (폰이 여기서 받아간다)
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        env:
+          GH_TOKEN: ${{ secrets.AUTOTRADER_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # 같은 태그를 계속 덮어쓴다 (--clobber). 없으면 만든다.
+          if gh release view latest >/dev/null 2>&1; then
+            # ⚠️ 예전에 올려둔 APK 가 릴리스에 남아 있으면 그것만으로도 아무나
+            #    내려받아 쓸 수 있다. 올릴 때마다 먼저 지운다.
+            # ⚠️ 저장소를 공개로 되돌렸다면(= 이번에 APK 를 안 만들었다면)
+            #    예전에 비공개였을 때 올라간 설치 파일을 **지운다.** 안 그러면
+            #    공개된 채로 남는다.
+            STALE="app-debug.apk signal-app.apk"
+            if [ ! -f release/autotrader.apk ]; then
+              STALE="$STALE autotrader.apk signal.apk signal-store-upload.aab signal-DO-NOT-UPLOAD.aab"
+            fi
+            for stale in $STALE; do
+              gh release delete-asset latest "$stale" -y 2>/dev/null \
+                && echo "릴리스에서 지웠습니다: $stale" || true
+            done
+            # ⚠️ 한 덩어리로 올리면(`release/* --clobber`) 자산 **하나**가
+            #    말을 안 들을 때 릴리스 전체가 실패한다. 실제로 겪었다:
+            #    깃허브가 kiwoom.zip 을 지우는 호출에 HTTP 500 을 계속 내서
+            #    멀쩡히 빌드된 APK·AAB 가 올라가지 못했다(두 번 연속).
+            #    그래서 **파일마다 따로, 몇 번 다시** 시도한다.
+            FAILED=""
+            for f in release/*; do
+              n=$(basename "$f")
+              ok=""
+              for try in 1 2 3; do
+                if gh release upload latest "$f" --clobber; then ok=1; break; fi
+                echo "::warning::$n 올리기 실패 ($try/3) — 잠시 뒤 다시 시도합니다."
+                sleep $((try * 5))
+                # 2회째부터는 기존 자산을 먼저 걷어내고 새로 올린다.
+                [ "$try" -ge 2 ] && gh release delete-asset latest "$n" -y 2>/dev/null || true
+              done
+              [ -n "$ok" ] || FAILED="$FAILED $n"
+            done
+            if [ -n "$FAILED" ]; then
+              echo "::error::릴리스에 올리지 못한 파일:$FAILED"
+              exit 1
+            fi
+            gh release edit latest \
+              --title "자동매매 1.0.${{ github.run_number }}" \
+              --notes "빌드 ${{ github.run_number }} · ${{ github.sha }}
+
+          폰의 앱이 이 릴리스를 보고 스스로 업데이트합니다.
+
+          **받아서 쓰는 파일**
+          · \`autotrader.apk\` — 자동매매 앱 설치 파일. **첫 설치 때만** 받으면 됩니다.
+            그 뒤로는 앱이 6시간마다 여기를 보고 새 버전을 알아서 받아두고 알림을 띄웁니다
+            (알림을 누르면 설치 — 안드로이드가 설치 확인을 받게 되어 있어 탭 한 번은 필요합니다)
+          · \`signal.apk\` — 매매신호 앱 설치 파일 (폰에 직접 깔아 써볼 때)
+          · \`signal-store-upload.aab\` — 플레이스토어에 올리는 파일 (전용 업로드 키로 서명됨)
+          · \`signal-DO-NOT-UPLOAD.aab\` — 저장소에 공개된 키로 서명됨. **플레이스토어에 올리지 마세요**
+
+          **앱이 알아서 쓰는 파일** (직접 받을 필요 없음)
+          · kis/kiwoom/upbit/flow/assist.zip · update.json"
+          else
+            gh release create latest release/* \
+              --title "자동매매 1.0.${{ github.run_number }}" \
+              --notes "빌드 ${{ github.run_number }} · ${{ github.sha }}
+
+          폰의 앱이 이 릴리스를 보고 스스로 업데이트합니다.
+
+          **받아서 쓰는 파일**
+          · \`autotrader.apk\` — 자동매매 앱 설치 파일. **첫 설치 때만** 받으면 됩니다.
+            그 뒤로는 앱이 6시간마다 여기를 보고 새 버전을 알아서 받아두고 알림을 띄웁니다
+            (알림을 누르면 설치 — 안드로이드가 설치 확인을 받게 되어 있어 탭 한 번은 필요합니다)
+          · \`signal.apk\` — 매매신호 앱 설치 파일 (폰에 직접 깔아 써볼 때)
+          · \`signal-store-upload.aab\` — 플레이스토어에 올리는 파일 (전용 업로드 키로 서명됨)
+          · \`signal-DO-NOT-UPLOAD.aab\` — 저장소에 공개된 키로 서명됨. **플레이스토어에 올리지 마세요**
+
+          **앱이 알아서 쓰는 파일** (직접 받을 필요 없음)
+          · kis/kiwoom/upbit/flow/assist.zip · update.json"
+          fi
+          echo "업데이트 주소: https://github.com/${{ env.SRC_REPO }}/releases/latest/download/update.json"
+
+      - name: 실패 시 로그 올리기
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            src/app/build/outputs/logs/
+            src/build/reports/
+          retention-days: 3
+          if-no-files-found: ignore
+
+  # ── 매수매도 신호 앱 (별도 APK) ───────────────────────────────────
+  # ⚠️ 자동매매 앱과 **다른 패키지명**(com.shin.signalalert)이라 한 폰에 둘 다
+  #    깔린다. 서로 영향을 주지 않는다.
+  # ⚠️ 이 앱은 주문을 내지 않는다. 아래에서 zip 안에 주문 코드가 없는지도 확인한다.
+  signal-app:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      GRADLE_OPTS: -Xmx5g -Dorg.gradle.daemon=false
+
+    steps:
+      - name: 소스 가져오기
+        uses: actions/checkout@v4
+        with:
+          # ⚠️ 공개 저장소가 불렀을 때 기본값은 **부른 쪽**이다. 여기를
+          #    비우면 엉뚱한 저장소를 받아 "AutoTrader.zip 이 없습니다" 로
+          #    죽는다.
+          repository: ${{ env.SRC_REPO }}
+          # 여기서 직접 밀었을 때는 그 가지를, 불려 왔을 때는 main 을.
+          ref: ${{ github.repository == 'tlsgusdlf33/autotrader' && github.ref || 'main' }}
+          token: ${{ secrets.AUTOTRADER_TOKEN || github.token }}
+
+      - name: 압축 풀기
+        run: |
+          set -e
+          if [ ! -f SignalApp.zip ]; then
+            echo "::error::SignalApp.zip 이 저장소에 없습니다."
+            exit 1
+          fi
+          mkdir -p sig
+          unzip -q SignalApp.zip -d sig
+          if [ ! -f sig/settings.gradle.kts ]; then
+            inner=$(find sig -maxdepth 2 -name settings.gradle.kts | head -1)
+            if [ -z "$inner" ]; then
+              echo "::error::settings.gradle.kts 를 찾을 수 없습니다. SignalApp.zip 내용을 확인해주세요."
+              exit 1
+            fi
+            mv "$(dirname "$inner")" sig_inner
+            rm -rf sig && mv sig_inner sig
+          fi
+          echo "-- 풀린 구조 --"
+          ls sig
+
+      # ⚠️ 그래들을 돌리기 전에 **먼저** 본다. 코틀린은 블록 주석이 중첩돼서
+      #    (자바와 다르다) 주석 안에 슬래시+별표가 들어가면 거기서 새 주석이
+      #    열리고 파일 끝까지 닫히지 않는다. 그러면 컴파일 오류가 **엉뚱한
+      #    줄**을 가리켜서 원인을 찾느라 빌드를 몇 번 더 날린다. 실제로 겪었다.
+      #    이 검사는 1초면 끝나고, 틀린 줄을 바로 집어준다.
+      - name: 코틀린 주석·괄호 확인
+        run: python3 tools/kt_syntax_check.py sig/app/src/main/java
+
+      - name: 주문 코드가 없는지 확인
+        run: |
+          set -e
+          # ⚠️ 이 앱의 약속은 "주문을 내지 않는다"이다. 사람 눈이 아니라
+          #    빌드가 지키게 한다 — 실수로 자동매매 쪽 파일이 섞여 들어오면
+          #    여기서 빌드를 세운다.
+          python - <<'EOF'
+          import sys, zipfile
+          z = zipfile.ZipFile("sig/app/src/main/assets/engines/signal.zip")
+          banned = ("order_domestic", "order_overseas", "cancel_domestic", "cancel_overseas")
+          bad = []
+          for n in z.namelist():
+              if not n.endswith(".py"):
+                  continue
+              body = z.read(n).decode("utf-8", "replace")
+              for b in banned:
+                  if f"def {b}" in body or f".{b}(" in body:
+                      bad.append(f"{n}: {b}")
+          if bad:
+              print("::error::신호 앱에 주문 코드가 들어있습니다: " + ", ".join(bad))
+              sys.exit(1)
+          print(f"주문 코드 없음 확인 ({len(z.namelist())}개 파일)")
+          EOF
+
+      - name: 광고 ID 적용
+        run: |
+          set -e
+          # ⚠️ 광고는 **매매신호 앱에만** 있다. 자동매매 앱은 본인만 쓰는 앱이라 뺐다.
+          # ⚠️ AdMob 앱 ID 는 패키지명에 묶여 있다. 자동매매 앱(com.shin.autotrader)의
+          #    ID 를 여기 넣으면 광고가 안 나오고 정책 위반이 된다.
+          #    매매신호 앱(com.shin.signalalert)용으로 **따로 만든** ID 를 써야 한다.
+          STR=sig/app/src/main/res/values/strings.xml
+          if [ ! -f admob_signal.txt ]; then
+            echo "::warning::admob_signal.txt 가 없어 구글 테스트 광고 ID를 그대로 씁니다 (수익 0원)."
+            exit 0
+          fi
+          APP_ID=$(grep -E '^APP_ID=' admob_signal.txt | head -1 | cut -d= -f2- | tr -d ' \r')
+          BANNER_ID=$(grep -E '^BANNER_ID=' admob_signal.txt | head -1 | cut -d= -f2- | tr -d ' \r')
+
+          case "$APP_ID" in
+            *~*) ;;
+            *) echo "::error::APP_ID 에 물결(~)이 없습니다. 광고 단위 ID를 잘못 넣으신 것 같습니다: $APP_ID"; exit 1;;
+          esac
+          case "$BANNER_ID" in
+            */*) ;;
+            *) echo "::error::BANNER_ID 에 슬래시(/)가 없습니다. 앱 ID를 잘못 넣으신 것 같습니다: $BANNER_ID"; exit 1;;
+          esac
+
+          sed -i "s|<string name=\"admob_app_id\">[^<]*</string>|<string name=\"admob_app_id\">$APP_ID</string>|" "$STR"
+          sed -i "s|<string name=\"admob_banner_id\">[^<]*</string>|<string name=\"admob_banner_id\">$BANNER_ID</string>|" "$STR"
+
+          # 전면 광고는 **없어도 된다.** 비워두면 빈 값을 넣어서 앱이 안 띄우게 한다.
+          INTER_ID=$(grep -E '^INTERSTITIAL_ID=' admob_signal.txt | head -1 | cut -d= -f2- | tr -d ' \r')
+          case "$INTER_ID" in
+            ""|*/*) ;;
+            *) echo "::error::INTERSTITIAL_ID 에 슬래시(/)가 없습니다. 앱 ID를 잘못 넣으신 것 같습니다: $INTER_ID"; exit 1;;
+          esac
+          sed -i "s|<string name=\"admob_interstitial_id\">[^<]*</string>|<string name=\"admob_interstitial_id\">$INTER_ID</string>|" "$STR"
+          if [ -z "$INTER_ID" ]; then
+            echo "::warning::전면 광고 ID 가 비어 있습니다 — 전면 광고는 뜨지 않습니다(기능은 정상)."
+          fi
+
+          echo "적용된 광고 ID:"
+          # ⚠️ 전면 광고도 같이 찍는다. 예전엔 app/banner 만 찍어서, 전면 광고에
+          #    엉뚱한 단위(앱 오프닝) ID 를 넣었는데도 로그만 봐서는 알 수 없었다.
+          grep -E 'admob_(app|banner|interstitial)_id' "$STR"
+          case "$APP_ID" in
+            ca-app-pub-3940256099942544*) echo "::warning::아직 구글 테스트 ID입니다 — 수익이 발생하지 않습니다.";;
+          esac
+
+      # ⚠️ 이 작업에는 자바 설정이 없어서 러너 기본 JDK 로 돌고 있었다.
+      #    AGP 8.10 은 JDK 17 이상을 요구한다 — 러너 기본값이 바뀌면 조용히
+      #    깨지므로 여기서 못 박는다.
+      - name: 자바 17 준비
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 파이썬 3.11 준비
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 안드로이드 SDK 준비
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Gradle 준비
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          # ⚠️ AGP 8.10(= API 36 을 아는 첫 버전)이 Gradle 8.11.1 이상을 요구한다.
+          #    자동매매앱(위 build 작업)은 AGP 8.7.3 이라 8.9 그대로 쓴다.
+          gradle-version: '8.11.1'
+
+      - name: 서명 키 준비 (비밀값이 있으면 그것을 쓴다)
+        env:
+          # ⚠️ 이 앱은 **스토어에 파는 앱**이라 자동매매앱과 **다른 키**를 쓰는 것이
+          #    맞다. SIGNAL_ 이 있으면 그것을, 없으면 공용 키를 쓴다.
+          SECRET_SIGNAL_B64: ${{ secrets.SIGNAL_KEYSTORE_BASE64 }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          set -e
+          # ⚠️ 저장소의 autotrader.jks 는 누구나 꺼낼 수 있어 **비밀이 아니다.**
+          #    비밀값을 넣어두면 그 키로 덮어써서 진짜 비밀 키로 서명한다.
+          # 비밀값이 있으면 그것, 없으면 비공개 저장소 파일에서 온 값.
+          SIGNAL_KEYSTORE_BASE64="${SECRET_SIGNAL_B64:-$SIGNAL_KEYSTORE_BASE64}"
+          if [ -n "$SIGNAL_KEYSTORE_BASE64" ]; then
+            echo "$SIGNAL_KEYSTORE_BASE64" | base64 -d > sig/app/autotrader.jks
+            echo "매매신호앱 전용 서명 키(SIGNAL_KEYSTORE_BASE64)로 교체했습니다."
+          elif [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > sig/app/autotrader.jks
+            echo "::warning::공용 서명 키(KEYSTORE_BASE64)로 서명합니다. 스토어에 올릴 앱은 SIGNAL_KEYSTORE_BASE64 로 **따로** 두는 것이 좋습니다."
+          else
+            echo "::warning::서명 키 비밀값이 없어 **저장소에 공개된 키**로 서명합니다. 누구나 같은 서명의 앱을 만들 수 있습니다."
+          fi
+
+      - name: 서명 키 확인
+        env:
+          SIGNAL_KEYSTORE_PASSWORD: ${{ secrets.SIGNAL_KEYSTORE_PASSWORD || env.FILE_SIGNAL_PW }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          set -e
+          if [ ! -f sig/app/autotrader.jks ]; then
+            echo "::error::app/autotrader.jks 가 없습니다."
+            exit 1
+          fi
+          PW="${SIGNAL_KEYSTORE_PASSWORD:-${KEYSTORE_PASSWORD:-autotrader}}"
+          keytool -list -v -keystore sig/app/autotrader.jks -storepass "$PW" | grep "SHA256:"
+
+      - name: 서명 지문 심기 (변조 감지용)
+        env:
+          SIGNAL_KEYSTORE_PASSWORD: ${{ secrets.SIGNAL_KEYSTORE_PASSWORD || env.FILE_SIGNAL_PW }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          set -e
+          # ⚠️ 누가 APK 를 뜯어 광고를 떼고 **다시 서명**하면 이 값이 달라진다.
+          #    앱이 그걸로 복제본을 알아채고 실행을 거부한다.
+          STR=sig/app/src/main/res/values/strings.xml
+          PW="${SIGNAL_KEYSTORE_PASSWORD:-${KEYSTORE_PASSWORD:-autotrader}}"
+          FP=$(keytool -list -v -keystore sig/app/autotrader.jks -storepass "$PW" 2>/dev/null \
+               | grep -m1 "SHA256:" | sed 's/.*SHA256: *//' | tr -d ': \r' | tr 'A-Z' 'a-z')
+          if [ ${#FP} -eq 64 ]; then
+            sed -i "s|<string name=\"expected_signature\"></string>|<string name=\"expected_signature\">$FP</string>|" "$STR"
+            echo "서명 지문 심음: ${FP:0:16}…"
+          else
+            echo "::warning::서명 지문을 못 읽었습니다 — 변조 검사 없이 빌드합니다."
+          fi
+
+      - name: APK 빌드
+        working-directory: sig
+        env:
+          APP_VERSION_CODE: ${{ github.run_number }}
+          APP_VERSION_NAME: 1.0.${{ github.run_number }}
+          # 비밀값이 없으면 gradle 쪽 기본값("autotrader")이 쓰인다.
+          # SIGNAL_ 이 있으면 그것이 이긴다 — 위에서 그 키로 교체했으니까.
+          KEYSTORE_PASSWORD: ${{ secrets.SIGNAL_KEYSTORE_PASSWORD || secrets.KEYSTORE_PASSWORD || env.FILE_SIGNAL_PW }}
+          KEYSTORE_ALIAS: ${{ secrets.SIGNAL_KEYSTORE_ALIAS || secrets.KEYSTORE_ALIAS || env.FILE_SIGNAL_ALIAS }}
+        run: gradle assembleDebug --stacktrace --no-daemon
+
+      - name: 결과 확인
+        run: ls -lh sig/app/build/outputs/apk/debug/
+
+      # ⚠️ 이 검사가 **플레이스토어 업로드 거부**를 미리 잡는다.
+      #    "New apps and app updates must target Android 16 (API level 36) or
+      #     higher to be submitted to Google Play" (2026-08-31 부터).
+      #    설정 파일에 36 이라고 적어두는 것과, 실제로 만들어진 파일이 36 인
+      #    것은 다른 이야기다 — AGP 가 낮으면 조용히 낮춰 버린다.
+      #    APK 와 AAB 는 같은 설정에서 나오므로 APK 로 재면 된다.
+      - name: 타겟 API 수준 확인 (스토어 조건)
+        run: |
+          set -e
+          REQUIRED=36
+          APK=$(ls sig/app/build/outputs/apk/debug/*.apk | head -1)
+          AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 2>/dev/null | sort -V | tail -1 || true)
+          if [ -z "$AAPT" ]; then
+            echo "::warning::aapt2 를 못 찾아 타겟 API 를 재지 못했습니다. 업로드 전에 직접 확인하세요."
+            exit 0
+          fi
+          LINE=$("$AAPT" dump badging "$APK" | grep -m1 targetSdkVersion || true)
+          echo "$LINE"
+          TARGET=$(echo "$LINE" | sed -E "s/.*targetSdkVersion:'([0-9]+)'.*/\1/")
+          case "$TARGET" in
+            ''|*[!0-9]*)
+              echo "::warning::타겟 API 를 읽지 못했습니다. 업로드 전에 직접 확인하세요."
+              exit 0;;
+          esac
+          if [ "$TARGET" -lt "$REQUIRED" ]; then
+            echo "::error::타겟 API 가 $TARGET 입니다. 플레이스토어는 $REQUIRED 이상을 요구하며 이대로는 **업로드가 거부**됩니다. app/build.gradle.kts 의 targetSdk 와 AGP 버전을 확인하세요."
+            exit 1
+          fi
+          echo "타겟 API $TARGET — 스토어 조건($REQUIRED 이상)을 만족합니다."
+
+      - name: APK 내려받기용으로 올리기
+        # ⚠️ 여기서 실패해도 빌드를 멈추지 않는다. 저장소를 비공개로 돌린 뒤
+        # 아티팩트 보관 용량(무료 500MB)이 금방 차는데, 그 때문에 **폰이 받아가는
+        # 릴리스 발행까지 건너뛰어** 업데이트가 끊겼다(run #96, #101). 릴리스는
+        # 아티팩트 용량과 무관하므로, 올리기가 실패해도 그쪽은 계속 가야 한다.
+        continue-on-error: true
+        # ⚠️ 공개 저장소에서 돌 때는 **올리지 않는다.** 공개 저장소의
+        #    artifact 는 링크만 알면 누구나 내려받는다. 서명된 AAB 가
+        #    그렇게 새면 안 된다. 결과물은 어차피 비공개 저장소의 릴리스로
+        #    올라가므로, 여기서 빠져도 받는 데는 지장이 없다.
+        if: github.repository == 'tlsgusdlf33/autotrader'
+        uses: actions/upload-artifact@v4
+        with:
+          name: signal-apk
+          path: sig/app/build/outputs/apk/debug/*.apk
+          retention-days: 3
+
+      # ── 플레이스토어용 AAB ────────────────────────────────────
+      # ⚠️ 플레이스토어는 APK 가 아니라 **AAB**(.aab)를 받는다.
+      - name: 스토어용 AAB 만들기
+        working-directory: sig
+        env:
+          APP_VERSION_CODE: ${{ github.run_number }}
+          APP_VERSION_NAME: 1.0.${{ github.run_number }}
+          KEYSTORE_PASSWORD: ${{ secrets.SIGNAL_KEYSTORE_PASSWORD || secrets.KEYSTORE_PASSWORD || env.FILE_SIGNAL_PW }}
+          KEYSTORE_ALIAS: ${{ secrets.SIGNAL_KEYSTORE_ALIAS || secrets.KEYSTORE_ALIAS || env.FILE_SIGNAL_ALIAS }}
+        run: gradle bundleRelease --stacktrace --no-daemon
+
+      # ⚠️⚠️ 이 단계가 **되돌릴 수 없는 사고**를 막는다.
+      #
+      # 플레이스토어는 **처음 올린 AAB 의 키를 그 앱의 업로드 키로 등록**한다.
+      # 저장소에 공개된 키로 서명한 AAB 를 한 번 올리면, 그 키를 가진 사람은
+      # 누구나 '내가 올린 것이 맞다'는 증명을 통과하는 파일을 만들 수 있다.
+      # 되돌릴 수는 있지만(구글에 '업로드 키 재설정' 요청) 승인을 기다려야 하고
+      # 그동안 업데이트를 못 올린다. 처음부터 제대로 하는 쪽이 훨씬 싸다.
+      #
+      # 그래서 전용 업로드 키(SIGNAL_KEYSTORE_BASE64)가 없으면 **파일 이름부터**
+      # 올리면 안 된다고 적어서 내보낸다. 실수로 집어 올릴 수 없게.
+      - name: AAB 가 올려도 되는 것인지 표시
+        id: aab
+        env:
+          SIGNAL_KEYSTORE_BASE64: ${{ secrets.SIGNAL_KEYSTORE_BASE64 || env.SIGNAL_KEYSTORE_BASE64 }}
+        run: |
+          set -e
+          ls -lh sig/app/build/outputs/bundle/release/
+          if [ -n "$SIGNAL_KEYSTORE_BASE64" ]; then
+            echo "name=signal-aab-스토어업로드용" >> "$GITHUB_OUTPUT"
+            echo "✅ 전용 업로드 키로 서명했습니다 — 플레이스토어에 올려도 됩니다."
+          else
+            echo "name=signal-aab-올리지마세요-테스트용" >> "$GITHUB_OUTPUT"
+            echo "::warning::SIGNAL_KEYSTORE_BASE64 가 없어 **저장소에 공개된 키**로 서명했습니다. 이 AAB 를 올리면 그 공개된 키가 이 앱의 업로드 키로 등록됩니다 — 올리지 마세요. 되돌리려면 구글에 '업로드 키 재설정'을 요청하고 승인을 기다려야 하고, 그동안 업데이트를 못 올립니다. 전용 업로드 키를 먼저 만드세요: Actions → 업로드 키 만들기 (한 번만)."
+          fi
+
+      - name: AAB 내려받기용으로 올리기
+        # ⚠️ 이것도 용량 때문에 빌드 전체를 실패시키지 않는다.
+        continue-on-error: true
+        # ⚠️ 공개 저장소에서 돌 때는 **올리지 않는다.** 공개 저장소의
+        #    artifact 는 링크만 알면 누구나 내려받는다. 서명된 AAB 가
+        #    그렇게 새면 안 된다. 결과물은 어차피 비공개 저장소의 릴리스로
+        #    올라가므로, 여기서 빠져도 받는 데는 지장이 없다.
+        if: github.repository == 'tlsgusdlf33/autotrader'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.aab.outputs.name }}
+          path: sig/app/build/outputs/bundle/release/*.aab
+          # 스토어에 올릴 AAB 는 받자마자 쓰는 것이라 오래 둘 이유가 없다.
+          retention-days: 3
+
+      # ── 설치용 APK · 스토어용 AAB 를 릴리스에도 올린다 ──────────
+      # ⚠️ 왜: Actions 아티팩트는 보관 용량이 차면 **아무것도** 올라가지 않는다
+      #    (run #96~#112에서 실제로 그랬다 — 받을 길이 아예 없었다).
+      #    릴리스 저장 공간은 그 용량과 무관하다.
+      # ⚠️ 비공개 저장소일 때만 올린다. 공개 저장소의 릴리스는 로그인 없이
+      #    누구나 받는다 — 그때는 올리지 않고, build 작업이 예전 것을 지운다.
+      - name: 설치 파일을 릴리스에 올리기
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.AUTOTRADER_TOKEN || secrets.GITHUB_TOKEN }}
+          SIGNAL_KEYSTORE_BASE64: ${{ secrets.SIGNAL_KEYSTORE_BASE64 || env.SIGNAL_KEYSTORE_BASE64 }}
+        run: |
+          set -e
+          PRIV="${{ github.event.repository.private }}"
+          if [ -z "$PRIV" ]; then
+            PRIV=$(gh api "repos/${{ env.SRC_REPO }}" --jq .private 2>/dev/null || echo "")
+          fi
+          if [ "$PRIV" != "true" ]; then
+            echo "::warning::저장소가 공개 상태로 보여 설치 파일을 릴리스에 올리지 않습니다."
+            exit 0
+          fi
+          # ⚠️ 'latest' 릴리스는 build 작업이 만든다. 두 작업이 같이 돌기 때문에
+          #    아직 없을 수 있다 — 잠깐 기다리되, 없다고 빌드를 깨뜨리지는 않는다.
+          for i in $(seq 1 10); do
+            gh release view latest >/dev/null 2>&1 && break
+            echo "릴리스를 기다리는 중... ($i/10)"
+            sleep 20
+          done
+          if ! gh release view latest >/dev/null 2>&1; then
+            echo "::warning::'latest' 릴리스가 아직 없습니다 — 다음 빌드에 올라갑니다."
+            exit 0
+          fi
+          mkdir -p out
+          cp sig/app/build/outputs/apk/debug/*.apk out/signal.apk
+          # ⚠️ AAB 는 **파일 이름으로** 올려도 되는지를 알려준다. 전용 업로드 키가
+          #    없으면 이름부터 DO-NOT-UPLOAD 다 — 실수로 집어 올릴 수 없게.
+          #    그리고 반대쪽 이름의 옛 파일은 지운다. 둘 다 보이면 헷갈린다.
+          if [ -n "$SIGNAL_KEYSTORE_BASE64" ]; then
+            cp sig/app/build/outputs/bundle/release/*.aab out/signal-store-upload.aab
+            gh release delete-asset latest signal-DO-NOT-UPLOAD.aab -y 2>/dev/null || true
+          else
+            cp sig/app/build/outputs/bundle/release/*.aab out/signal-DO-NOT-UPLOAD.aab
+            gh release delete-asset latest signal-store-upload.aab -y 2>/dev/null || true
+          fi
+          ls -lh out/
+          gh release upload latest out/* --clobber
+          echo "받는 곳: https://github.com/${{ env.SRC_REPO }}/releases/latest"

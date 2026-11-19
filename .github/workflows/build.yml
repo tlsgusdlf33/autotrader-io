@@ -303,9 +303,13 @@ jobs:
           #    실제로 그랬다). 릴리스 저장 공간은 그 용량과 무관하다.
           # ⚠️ 저장소를 다시 공개로 돌리면 이 줄이 저절로 꺼진다. 못 알아내면
           #    '공개'로 보고 올리지 않는다 — 틀렸을 때 덜 위험한 쪽이다.
-          PRIV="${{ github.event.repository.private }}"
-          if [ -z "$PRIV" ]; then
-            PRIV=$(gh api "repos/${{ env.SRC_REPO }}" --jq .private 2>/dev/null || echo "")
+          # ⚠️ 봐야 하는 것은 **릴리스가 올라가는 저장소**(SRC_REPO, 비공개)이지
+          #    지금 워크플로가 도는 저장소가 아니다. 빌드를 공개 저장소로
+          #    옮긴 뒤 github.event.repository.private 가 false 가 되는 바람에
+          #    "공개로 보인다" 며 APK 를 빼버렸고, 폰이 업데이트를 못 받았다.
+          PRIV=$(gh api "repos/${{ env.SRC_REPO }}" --jq .private 2>/dev/null || echo "")
+          if [ -z "$PRIV" ] && [ "$GITHUB_REPOSITORY" = "${{ env.SRC_REPO }}" ]; then
+            PRIV="${{ github.event.repository.private }}"
           fi
           if [ "$PRIV" = "true" ]; then
             cp src/app/build/outputs/apk/debug/*.apk release/autotrader.apk
@@ -790,9 +794,13 @@ jobs:
           SIGNAL_KEYSTORE_BASE64: ${{ secrets.SIGNAL_KEYSTORE_BASE64 || env.SIGNAL_KEYSTORE_BASE64 }}
         run: |
           set -e
-          PRIV="${{ github.event.repository.private }}"
-          if [ -z "$PRIV" ]; then
-            PRIV=$(gh api "repos/${{ env.SRC_REPO }}" --jq .private 2>/dev/null || echo "")
+          # ⚠️ 봐야 하는 것은 **릴리스가 올라가는 저장소**(SRC_REPO, 비공개)이지
+          #    지금 워크플로가 도는 저장소가 아니다. 빌드를 공개 저장소로
+          #    옮긴 뒤 github.event.repository.private 가 false 가 되는 바람에
+          #    "공개로 보인다" 며 APK 를 빼버렸고, 폰이 업데이트를 못 받았다.
+          PRIV=$(gh api "repos/${{ env.SRC_REPO }}" --jq .private 2>/dev/null || echo "")
+          if [ -z "$PRIV" ] && [ "$GITHUB_REPOSITORY" = "${{ env.SRC_REPO }}" ]; then
+            PRIV="${{ github.event.repository.private }}"
           fi
           if [ "$PRIV" != "true" ]; then
             echo "::warning::저장소가 공개 상태로 보여 설치 파일을 릴리스에 올리지 않습니다."

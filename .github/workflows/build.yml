@@ -23,11 +23,18 @@ name: Build APK
 on:
   workflow_dispatch:
   schedule:
-    # 한국시간 평일 새벽 6시 10분.
     - cron: '10 21 * * 0-4'
 
 env:
   SRC_REPO: tlsgusdlf33/autotrader
+  # ⚠️⚠️ 빌드 번호는 **저장소마다 따로** 센다. 빌드를 공개 저장소로 옮겼더니
+  #    run_number 가 1 부터 다시 시작해서, 폰이 "이미 최신" 이라며 업데이트를
+  #    거부했다(깔린 것 271 > 새로 올린 것 1). 안드로이드도 versionCode 가
+  #    낮으면 덮어 설치를 막는다.
+  #    그래서 **옮기기 전까지 쓴 번호**를 바닥으로 깔고 그 위에 센다.
+  #    ⚠️ 이 값을 줄이지 말 것. 한 번 올라간 versionCode 보다 낮아지면
+  #       그 뒤로 영영 업데이트가 안 된다.
+  BUILD_BASE: 290
   #: gh 명령이 모두 이 저장소를 보게 한다(릴리스가 공개 저장소로 새지 않게).
   GH_REPO: tlsgusdlf33/autotrader
 
@@ -220,8 +227,8 @@ jobs:
         env:
           # ⚠️ 덮어 설치가 되려면 versionCode 가 이전보다 작으면 안 된다.
           # 깃허브 실행 번호는 빌드할 때마다 1씩 커지므로 그대로 쓴다.
-          APP_VERSION_CODE: ${{ github.run_number }}
-          APP_VERSION_NAME: 1.0.${{ github.run_number }}
+          APP_VERSION_CODE: ${{ github.repository == env.SRC_REPO && github.run_number || fromJSON(env.BUILD_BASE) + github.run_number }}
+          APP_VERSION_NAME: 1.0.${{ github.repository == env.SRC_REPO && github.run_number || fromJSON(env.BUILD_BASE) + github.run_number }}
           # 비밀값이 없으면 gradle 쪽 기본값("autotrader")이 쓰인다
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
@@ -318,12 +325,12 @@ jobs:
           # 어긋나면 이미 들어있는 코드를 계속 다시 받는다.
           cat > release/update.json <<JSON
           {
-            "version_code": ${{ github.run_number }},
-            "version_name": "1.0.${{ github.run_number }}",
+            "version_code": ${{ github.repository == env.SRC_REPO && github.run_number || fromJSON(env.BUILD_BASE) + github.run_number }},
+            "version_name": "1.0.${{ github.repository == env.SRC_REPO && github.run_number || fromJSON(env.BUILD_BASE) + github.run_number }}",
             "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "commit": "${{ github.sha }}",$APK_JSON
             "engines": {
-              "bundle_id": ${{ github.run_number }},
+              "bundle_id": ${{ github.repository == env.SRC_REPO && github.run_number || fromJSON(env.BUILD_BASE) + github.run_number }},
               "files": {
                 "kis":    { "name": "kis.zip",    "sha256": "$(sha kis.zip)" },
                 "kiwoom": { "name": "kiwoom.zip", "sha256": "$(sha kiwoom.zip)" },
@@ -381,8 +388,8 @@ jobs:
               exit 1
             fi
             gh release edit latest \
-              --title "자동매매 1.0.${{ github.run_number }}" \
-              --notes "빌드 ${{ github.run_number }} · ${{ github.sha }}
+              --title "자동매매 1.0.${{ github.repository == env.SRC_REPO && github.run_number || fromJSON(env.BUILD_BASE) + github.run_number }}" \
+              --notes "빌드 ${{ github.repository == env.SRC_REPO && github.run_number || fromJSON(env.BUILD_BASE) + github.run_number }} · ${{ github.sha }}
 
           폰의 앱이 이 릴리스를 보고 스스로 업데이트합니다.
 
@@ -398,8 +405,8 @@ jobs:
           · kis/kiwoom/upbit/flow/assist.zip · update.json"
           else
             gh release create latest release/* \
-              --title "자동매매 1.0.${{ github.run_number }}" \
-              --notes "빌드 ${{ github.run_number }} · ${{ github.sha }}
+              --title "자동매매 1.0.${{ github.repository == env.SRC_REPO && github.run_number || fromJSON(env.BUILD_BASE) + github.run_number }}" \
+              --notes "빌드 ${{ github.repository == env.SRC_REPO && github.run_number || fromJSON(env.BUILD_BASE) + github.run_number }} · ${{ github.sha }}
 
           폰의 앱이 이 릴리스를 보고 스스로 업데이트합니다.
 
@@ -634,8 +641,8 @@ jobs:
       - name: APK 빌드
         working-directory: sig
         env:
-          APP_VERSION_CODE: ${{ github.run_number }}
-          APP_VERSION_NAME: 1.0.${{ github.run_number }}
+          APP_VERSION_CODE: ${{ github.repository == env.SRC_REPO && github.run_number || fromJSON(env.BUILD_BASE) + github.run_number }}
+          APP_VERSION_NAME: 1.0.${{ github.repository == env.SRC_REPO && github.run_number || fromJSON(env.BUILD_BASE) + github.run_number }}
           # 비밀값이 없으면 gradle 쪽 기본값("autotrader")이 쓰인다.
           # SIGNAL_ 이 있으면 그것이 이긴다 — 위에서 그 키로 교체했으니까.
           KEYSTORE_PASSWORD: ${{ secrets.SIGNAL_KEYSTORE_PASSWORD || secrets.KEYSTORE_PASSWORD || env.FILE_SIGNAL_PW }}
@@ -697,8 +704,8 @@ jobs:
       - name: 스토어용 AAB 만들기
         working-directory: sig
         env:
-          APP_VERSION_CODE: ${{ github.run_number }}
-          APP_VERSION_NAME: 1.0.${{ github.run_number }}
+          APP_VERSION_CODE: ${{ github.repository == env.SRC_REPO && github.run_number || fromJSON(env.BUILD_BASE) + github.run_number }}
+          APP_VERSION_NAME: 1.0.${{ github.repository == env.SRC_REPO && github.run_number || fromJSON(env.BUILD_BASE) + github.run_number }}
           KEYSTORE_PASSWORD: ${{ secrets.SIGNAL_KEYSTORE_PASSWORD || secrets.KEYSTORE_PASSWORD || env.FILE_SIGNAL_PW }}
           KEYSTORE_ALIAS: ${{ secrets.SIGNAL_KEYSTORE_ALIAS || secrets.KEYSTORE_ALIAS || env.FILE_SIGNAL_ALIAS }}
         run: gradle bundleRelease --stacktrace --no-daemon

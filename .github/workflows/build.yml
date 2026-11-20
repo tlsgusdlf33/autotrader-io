@@ -1,13 +1,7 @@
 # ⚠️⚠️ 이 파일은 비공개 저장소 tlsgusdlf33/autotrader 의
-#      .github/workflows/main.yml **사본**이다. 고칠 때는 **양쪽 다** 고쳐야
-#      한다. 한쪽만 고치면 어느 쪽에서 돌렸느냐에 따라 결과가 달라진다.
-#
-# ⚠️ 왜 사본인가 — 비공개 저장소의 워크플로는 공개 저장소에서 **부를 수 없다**
-#    (workflow was not found). 그래서 부르지 않고 복사해 둔다.
-#
-# ⚠️ 여기에 비밀은 없다. 빌드 순서뿐이고, 소스·서명키·비밀번호는 전부
-#    비공개 저장소에서 토큰(AUTOTRADER_TOKEN)으로 받아온다. 이 파일을
-#    복사해 가도 토큰이 없으면 첫 단계에서 막힌다.
+#      .github/workflows/main.yml 에서 **자동으로 복사**된다.
+#      여기서 고치지 마라 — 다음 복사 때 지워진다. 비공개 쪽을 고치면
+#      이 파일이 따라온다(sync-public.yml).
 name: Build APK
 
 # ⚠️ 이 저장소는 **비공개**라 Actions 분(分)이 한도가 있고, 실제로 다 썼다
@@ -457,6 +451,10 @@ jobs:
   #    깔린다. 서로 영향을 주지 않는다.
   # ⚠️ 이 앱은 주문을 내지 않는다. 아래에서 zip 안에 주문 코드가 없는지도 확인한다.
   signal-app:
+    # ⚠️ 가지(claude/**)에 밀 때는 돌리지 않는다. 자동매매앱만 확인하면
+    #    되는 변경이 대부분인데, 매매신호앱까지 빌드하면 한 번에 6분이
+    #    더 든다. main 과 손으로 돌릴 때는 그대로 둘 다 빌드한다.
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -677,6 +675,10 @@ jobs:
           # SIGNAL_ 이 있으면 그것이 이긴다 — 위에서 그 키로 교체했으니까.
           KEYSTORE_PASSWORD: ${{ secrets.SIGNAL_KEYSTORE_PASSWORD || secrets.KEYSTORE_PASSWORD || env.FILE_SIGNAL_PW }}
           KEYSTORE_ALIAS: ${{ secrets.SIGNAL_KEYSTORE_ALIAS || secrets.KEYSTORE_ALIAS || env.FILE_SIGNAL_ALIAS }}
+          # ⚠️ 구글 로그인은 구글 클라우드에 OAuth 클라이언트를 등록해야
+          #    돈다. 등록을 마친 뒤 비밀값 GOOGLE_SIGN_IN=1 을 넣으면
+          #    화면에 '구글 계정으로 옮기기' 칸이 나온다.
+          GOOGLE_SIGN_IN: ${{ secrets.GOOGLE_SIGN_IN }}
         run: gradle assembleDebug --stacktrace --no-daemon
 
       - name: 결과 확인
@@ -738,6 +740,10 @@ jobs:
           APP_VERSION_NAME: 1.0.${{ env.BUILD_NO }}
           KEYSTORE_PASSWORD: ${{ secrets.SIGNAL_KEYSTORE_PASSWORD || secrets.KEYSTORE_PASSWORD || env.FILE_SIGNAL_PW }}
           KEYSTORE_ALIAS: ${{ secrets.SIGNAL_KEYSTORE_ALIAS || secrets.KEYSTORE_ALIAS || env.FILE_SIGNAL_ALIAS }}
+          # ⚠️ 구글 로그인은 구글 클라우드에 OAuth 클라이언트를 등록해야
+          #    돈다. 등록을 마친 뒤 비밀값 GOOGLE_SIGN_IN=1 을 넣으면
+          #    화면에 '구글 계정으로 옮기기' 칸이 나온다.
+          GOOGLE_SIGN_IN: ${{ secrets.GOOGLE_SIGN_IN }}
         run: gradle bundleRelease --stacktrace --no-daemon
 
       # ⚠️⚠️ 이 단계가 **되돌릴 수 없는 사고**를 막는다.
@@ -792,6 +798,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.AUTOTRADER_TOKEN || secrets.GITHUB_TOKEN }}
           SIGNAL_KEYSTORE_BASE64: ${{ secrets.SIGNAL_KEYSTORE_BASE64 || env.SIGNAL_KEYSTORE_BASE64 }}
+          BUILD_NO: ${{ env.BUILD_NO }}
         run: |
           set -e
           # ⚠️ 봐야 하는 것은 **릴리스가 올라가는 저장소**(SRC_REPO, 비공개)이지
@@ -822,13 +829,71 @@ jobs:
           # ⚠️ AAB 는 **파일 이름으로** 올려도 되는지를 알려준다. 전용 업로드 키가
           #    없으면 이름부터 DO-NOT-UPLOAD 다 — 실수로 집어 올릴 수 없게.
           #    그리고 반대쪽 이름의 옛 파일은 지운다. 둘 다 보이면 헷갈린다.
+          # ⚠️ 이름에 **버전 번호**를 넣는다. 받아둔 파일이 여러 개 섞이면
+          #    어느 것을 올렸는지 알 수가 없다 — 콘솔은 같은 버전을 두 번
+          #    받지 않으므로, 올리다 막혔을 때 이름만 보고 가려야 한다.
+          V="1.0.${BUILD_NO}"
           if [ -n "$SIGNAL_KEYSTORE_BASE64" ]; then
-            cp sig/app/build/outputs/bundle/release/*.aab out/signal-store-upload.aab
-            gh release delete-asset latest signal-DO-NOT-UPLOAD.aab -y 2>/dev/null || true
+            cp sig/app/build/outputs/bundle/release/*.aab "out/signal-$V-store-upload.aab"
           else
-            cp sig/app/build/outputs/bundle/release/*.aab out/signal-DO-NOT-UPLOAD.aab
-            gh release delete-asset latest signal-store-upload.aab -y 2>/dev/null || true
+            cp sig/app/build/outputs/bundle/release/*.aab "out/signal-$V-DO-NOT-UPLOAD.aab"
           fi
+          # 예전 버전의 AAB 는 지운다. 이름이 버전마다 달라서 쌓이면
+          # 릴리스가 AAB 목록으로 뒤덮인다. 지금 올릴 것만 남긴다.
+          gh release view latest --json assets --jq '.assets[].name' 2>/dev/null \
+            | grep -E '^signal.*\.aab$' | while read -r a; do
+                [ -f "out/$a" ] && continue
+                gh release delete-asset latest "$a" -y 2>/dev/null \
+                  && echo "릴리스에서 지웠습니다: $a" || true
+              done
           ls -lh out/
           gh release upload latest out/* --clobber
           echo "받는 곳: https://github.com/${{ env.SRC_REPO }}/releases/latest"
+
+      # ── 공개 '번호판' ────────────────────────────────────────────
+      # ⚠️ 왜 필요한가: 플레이스토어로 깔린 앱은 **스토어만** 바꿀 수 있다.
+      #    새 AAB 를 올려도 사용자 폰에 '업데이트' 가 뜨는 데 몇 시간~하루가
+      #    걸리고, 자동 업데이트를 꺼둔 사람은 영원히 안 올라간다. 그래서
+      #    앱이 직접 이 파일을 읽고 묻는다.
+      # ⚠️ **공개** 저장소에 둔다. 스토어로 깔린 앱에는 깃허브 토큰이 없어서
+      #    비공개 저장소를 읽을 수 없다. 버전 번호 말고는 아무것도 안 적는다.
+      # ⚠️ min(이 번호 미만은 못 쓴다)은 **사람이 올린다** — version-floor.json
+      #    한 줄. 자동으로 올리면 모든 빌드가 강제 업데이트가 되어 버린다.
+      - name: 공개 번호판 올리기
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.AUTOTRADER_TOKEN || secrets.GITHUB_TOKEN }}
+          BUILD_NO: ${{ env.BUILD_NO }}
+        run: |
+          set -e
+          # min(이 번호 미만은 못 쓴다)과 안내문은 version-floor.json 에서.
+          # 파일이 없으면 min=0 — 강제 업데이트 없음.
+          python3 - <<'PY' > version.json
+          import json, os, datetime, pathlib
+          f = pathlib.Path("version-floor.json")
+          d = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+          n = int(os.environ["BUILD_NO"])
+          print(json.dumps({"signal": {
+              "min": int(d.get("signal_min", 0)),
+              "latest": n,
+              "version_name": f"1.0.{n}",
+              "built_at": datetime.datetime.now(datetime.timezone.utc)
+                          .strftime("%Y-%m-%d %H:%M UTC"),
+              "note": str(d.get("note", "")),
+          }}, ensure_ascii=False, indent=1))
+          PY
+          cat version.json
+          # ⚠️ 공개 저장소에 **덮어쓴다.** 이미 있으면 sha 를 같이 보내야 받는다.
+          SHA=$(gh api "repos/tlsgusdlf33/autotrader-io/contents/version.json" \
+                  --jq .sha 2>/dev/null || echo "")
+          if [ -n "$SHA" ]; then
+            gh api -X PUT "repos/tlsgusdlf33/autotrader-io/contents/version.json" \
+              -f "message=번호판 1.0.${BUILD_NO}" \
+              -f "content=$(base64 -w0 version.json)" -f "sha=$SHA" --jq .content.path
+          else
+            gh api -X PUT "repos/tlsgusdlf33/autotrader-io/contents/version.json" \
+              -f "message=번호판 1.0.${BUILD_NO}" \
+              -f "content=$(base64 -w0 version.json)" --jq .content.path
+          fi
+          echo "번호판: https://raw.githubusercontent.com/tlsgusdlf33/autotrader-io/main/version.json"

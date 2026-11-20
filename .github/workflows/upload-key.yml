@@ -1,0 +1,206 @@
+# 플레이스토어용 '업로드 키'를 깃허브에서 만들어 비밀값에 바로 넣는다.
+#
+# ⚠️ 왜 이 워크플로가 있나
+# 업로드 키는 보통 PC에서 `keytool` 로 만든다. 그런데 PC 없이 폰만 쓰는 경우
+# 그 단계에서 아예 막힌다 — 그러면 스토어에 올릴 수 있는 AAB 가 영영 안 나온다.
+# 여기서는 깃허브 기계가 키를 만들고, **사람 손을 거치지 않고** 비밀값에 넣는다.
+# 긴 글자(base64)를 폰에서 복사·붙여넣기 하다 잘려서 빌드가 깨지는 일도 없다.
+#
+# ⚠️ 안전장치
+#  · 손으로만 돌아간다(workflow_dispatch). 푸시로는 절대 안 돈다.
+#  · '만들기' 라고 그대로 입력해야 돈다. 실수로 눌러도 아무 일이 없다.
+#  · 이미 키가 있으면 멈춘다. 스토어에 한 번 등록된 키를 말없이 갈아치우면
+#    업로드가 거부되고 구글에 재설정을 요청해야 한다.
+#  · 비밀번호와 키 내용은 **로그에 한 번도 찍지 않는다**(::add-mask:: + 리다이렉트).
+#    로그에 남는 것은 공개해도 되는 지문(SHA-256)뿐이다.
+name: 업로드 키 만들기 / 다시 만들기
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: '만들려면 아래 칸에 만들기 라고 그대로 입력하세요'
+        required: true
+        default: ''
+      overwrite:
+        description: '이미 키가 있는데도 새로 만들려면 덮어쓰기 입력 (보통은 비워두세요)'
+        required: false
+        default: ''
+jobs:
+  make-upload-key:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # 백업 파일을 임시 릴리스로 올릴 때만 쓴다 (backup 을 입력했을 때).
+      contents: write
+
+    steps:
+      - name: 입력 확인
+        # ⚠️ 입력값을 run: 안에 ${{ }} 로 바로 끼워 넣으면, 입력한 글자가
+        #    **명령으로 실행된다.** env 로 넘기면 그냥 글자로만 다뤄진다.
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -e
+          if [ "$CONFIRM" != "만들기" ]; then
+            echo "::error::'만들기' 라고 그대로 입력해야 합니다. 아무것도 하지 않았습니다."
+            exit 1
+          fi
+          echo "확인됐습니다."
+
+      - name: 준비물 확인
+        env:
+          GH_PAT: ${{ secrets.KEY_SETUP_PAT }}
+          HAVE_KEY: ${{ secrets.SIGNAL_KEYSTORE_BASE64 }}
+          OVERWRITE: ${{ inputs.overwrite }}
+        run: |
+          set -e
+          if [ -z "$GH_PAT" ]; then
+            echo "::error::KEY_SETUP_PAT 비밀값이 없습니다. 깃허브 토큰을 먼저 만들어 'KEY_SETUP_PAT' 이라는 이름의 비밀값으로 넣어주세요 (권한: Secrets = Read and write)."
+            exit 1
+          fi
+          # ⚠️ 이미 있는 키를 말없이 갈아치우면, 스토어가 기억하는 업로드 키와
+          #    달라져서 업데이트 업로드가 **거부된다.** 되돌리려면 구글에
+          #    '업로드 키 재설정'을 요청하고 승인을 기다려야 한다.
+          if [ -n "$HAVE_KEY" ] && [ "$OVERWRITE" != "덮어쓰기" ]; then
+            echo "::error::이미 업로드 키(SIGNAL_KEYSTORE_BASE64)가 있습니다. 정말 새로 만들려면 '덮어쓰기' 칸에 덮어쓰기 라고 입력하세요. 스토어에 이미 올린 앱이 있다면 새 키로는 업데이트를 못 올립니다."
+            exit 1
+          fi
+          echo "준비됐습니다."
+
+      - name: 자바 17 준비
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 키 만들기
+        id: make
+        run: |
+          set -e
+          # ⚠️ 비밀번호는 기계가 만든다. 사람이 입력창에 치면 그 값이 실행 기록에
+          #    그대로 남는다. 영문·숫자만 써서 따옴표 문제가 생기지 않게 한다.
+          PW=$(openssl rand -hex 16)
+          echo "::add-mask::$PW"
+
+          keytool -genkeypair \
+            -keystore upload.jks \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -alias upload \
+            -storepass "$PW" -keypass "$PW" \
+            -dname "CN=SignalApp Upload, OU=Dev, O=Personal, L=Seoul, C=KR" \
+            > /dev/null 2>&1
+
+          if [ ! -s upload.jks ]; then
+            echo "::error::키 파일이 만들어지지 않았습니다."
+            exit 1
+          fi
+
+          # ⚠️ 바로 되읽어서 쓸 수 있는 키인지 확인한다. 여기서 안 걸리면
+          #    나중에 빌드가 '비밀번호 틀림'으로 깨지는데 원인을 찾기 어렵다.
+          keytool -list -keystore upload.jks -storepass "$PW" -alias upload > /dev/null
+
+          # 지문은 공개해도 되는 값이다 (인증서의 해시).
+          FP=$(keytool -list -v -keystore upload.jks -storepass "$PW" -alias upload \
+               | grep -m1 "SHA256:" | sed 's/.*SHA256: *//' | tr -d ' \r' || true)
+          if [ -z "$FP" ]; then
+            echo "::error::키는 만들어졌는데 지문을 못 읽었습니다. 안전을 위해 여기서 멈춥니다."
+            exit 1
+          fi
+          echo "만든 키의 지문 (공개해도 되는 값): $FP"
+          echo "fp=$FP" >> "$GITHUB_OUTPUT"
+
+          # ⚠️ base64 와 비밀번호는 **파일로만** 다룬다. 변수에 담아 echo 하면
+          #    마스킹이 뚫리는 경우가 있다. 파일은 로그에 찍히지 않는다.
+          # ⚠️ 끝의 줄바꿈을 떼어낸다. 붙은 채로 비밀값에 들어가도 빌드는
+          #    돌지만(base64 -d 가 공백을 무시한다), 값이 깨끗한 편이 낫다.
+          base64 -w0 upload.jks | tr -d '\n' > key.b64
+          printf '%s' "$PW" > pw.txt
+          printf 'upload' > alias.txt
+
+          # 되돌려 디코드했을 때 원본과 같은지 확인 (빌드가 하는 일과 같다).
+          cat key.b64 | base64 -d > roundtrip.jks
+          cmp -s upload.jks roundtrip.jks \
+            && echo "base64 왕복 확인 완료" \
+            || { echo "::error::base64 변환이 잘못됐습니다."; exit 1; }
+          rm -f roundtrip.jks
+
+          # ⚠️ Play Console 의 '업로드 키 재설정' 은 새 키의 **공개 인증서**를
+          #    요구한다(upload_certificate.pem). 개인 키가 아니라 공개 값이라
+          #    아무나 봐도 해가 없다 — 그래서 이것만 내려받게 올린다.
+          keytool -export -rfc \
+            -keystore upload.jks -storepass "$PW" -alias upload \
+            -file upload_certificate.pem
+          test -s upload_certificate.pem || {
+            echo "::error::공개 인증서를 못 만들었습니다."; exit 1; }
+
+      - name: 깃허브 비밀값에 넣기
+        env:
+          GH_TOKEN: ${{ secrets.KEY_SETUP_PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          # ⚠️ gh 가 암호화까지 해준다. 사람이 긴 글자를 복사·붙여넣기 할 일이
+          #    없으므로, 잘려 들어가서 빌드가 깨지는 사고가 아예 없다.
+          gh secret set SIGNAL_KEYSTORE_BASE64   --repo "$REPO" < key.b64
+          gh secret set SIGNAL_KEYSTORE_PASSWORD --repo "$REPO" < pw.txt
+          gh secret set SIGNAL_KEYSTORE_ALIAS    --repo "$REPO" < alias.txt
+          echo "비밀값 3개를 넣었습니다:"
+          gh secret list --repo "$REPO" | grep -E 'SIGNAL_KEYSTORE' || true
+
+      # ⚠️ 올리는 것은 **공개 인증서 하나뿐**이다. 공개 저장소의 artifact 는
+      #    링크만 알면 누구나 받는다 — 개인 키(.jks)는 절대 올리지 않는다.
+      - name: 공개 인증서 내려받기용으로 올리기
+        uses: actions/upload-artifact@v4
+        with:
+          name: upload-certificate-구글에-낼-파일
+          path: upload_certificate.pem
+          retention-days: 14
+
+      - name: 결과 안내
+        env:
+          FP: ${{ steps.make.outputs.fp }}
+        run: |
+          {
+            echo "## ✅ 업로드 키를 만들었습니다"
+            echo
+            echo "비밀값 3개가 저장소에 들어갔습니다 — 손으로 넣으실 것은 없습니다."
+            echo
+            echo '| 비밀값 이름 | 값 |'
+            echo '|---|---|'
+            echo '| `SIGNAL_KEYSTORE_BASE64` | 키 파일 (기계가 넣음) |'
+            echo '| `SIGNAL_KEYSTORE_PASSWORD` | 기계가 만든 무작위 비밀번호 |'
+            echo '| `SIGNAL_KEYSTORE_ALIAS` | `upload` |'
+            echo
+            echo "키 지문 (공개해도 되는 값):"
+            echo '```'
+            echo "$FP"
+            echo '```'
+            echo
+            echo "### 다음에 하실 일"
+            echo
+            echo "**스토어에 이미 올린 앱의 키를 새로 만들었다면**, 구글에 알려야"
+            echo "그 키로 올릴 수 있습니다. 옛 키로는 더 못 올립니다."
+            echo
+            echo "1. 이 실행의 **Artifacts → upload-certificate-구글에-낼-파일** 을 받으세요"
+            echo "   (\`upload_certificate.pem\` — 공개 값이라 새도 해가 없습니다)."
+            echo "2. Play Console → 테스트 및 출시 → 설정 → **앱 서명**"
+            echo "   → 업로드 키 인증서 → **업로드 키 재설정 요청**"
+            echo "   → 이유는 '업로드 키를 분실했습니다' 를 고르고, 받은 pem 을 첨부."
+            echo "3. 승인(보통 며칠)되면 **Actions → Build → Run workflow**."
+            echo "4. **Releases → latest** 에 **\`signal-1.0.XXX-store-upload.aab\`**"
+            echo "   가 나옵니다(이름이 바뀌면 성공). 그 파일을 올리시면 됩니다."
+            echo
+            echo "⚠️ 승인 전에 돌린 빌드는 올려도 콘솔이 거절합니다. 기다리세요."
+            echo "⚠️ **앱 서명 키는 구글이 들고 있습니다.** 업로드 키를 잃어도"
+            echo "   사용자들의 업데이트 경로는 끊기지 않습니다."
+            echo
+            echo "### 알아두실 것"
+            echo
+            echo "- 비밀번호는 기계만 알고 있고 빌드가 알아서 씁니다. 외우실 필요 없습니다."
+            echo "- 이 키를 잃어버려도 앱이 잠기지는 않습니다. 구글에 **업로드 키 재설정**을"
+            echo "  요청할 수 있습니다 (Play Console → Google Play로 보호됨 → Play 스토어 보호"
+            echo "  → Play 앱 서명 관리 → 업로드 키 인증서 → 업로드 키 재설정 요청)."
+            echo "- **다 끝나면 \`KEY_SETUP_PAT\` 비밀값과 깃허브 토큰을 지우세요.** 더는 필요 없습니다."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "완료. 위 요약(Summary)을 확인하세요."

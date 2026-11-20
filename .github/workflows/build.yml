@@ -902,3 +902,41 @@ jobs:
               -f "content=$(base64 -w0 version.json)" --jq .content.path
           fi
           echo "번호판: https://raw.githubusercontent.com/tlsgusdlf33/autotrader-io/main/version.json"
+
+      # ── 공개 저장소 점검 ────────────────────────────────────────
+      # ⚠️ 공개 저장소에 **빌드 파일 말고 아무것도 없어야** 한다. 키나 앱
+      #    코드가 거기로 새면 되돌릴 수 없다(git 역사에 남는다).
+      #    그래서 빌드가 끝날 때마다 목록을 받아 허용한 것만 있는지 센다.
+      # ⚠️ 파일을 **읽지 않는다.** 목록(이름)만 본다 — 로그에 내용이 찍히면
+      #    그게 또 다른 누출이다.
+      - name: 공개 저장소 점검
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.repository == 'tlsgusdlf33/autotrader-io'
+                        && secrets.GITHUB_TOKEN || secrets.AUTOTRADER_TOKEN }}
+        run: |
+          set -e
+          gh api "repos/tlsgusdlf33/autotrader-io/git/trees/main?recursive=1" \
+            --jq '.tree[]|select(.type=="blob")|.path' | sort > pub.txt
+          echo "공개 저장소에 있는 것:"; sed 's/^/  /' pub.txt
+          # 허용 목록. 이 밖의 것이 하나라도 있으면 경고를 띄운다.
+          cat > allow.txt <<'EOF'
+          .github/workflows/build.yml
+          .github/workflows/clean-logs.yml
+          .github/workflows/upload-key.yml
+          README.md
+          VERSION-번호판.md
+          version.json
+          EOF
+          sort -o allow.txt allow.txt
+          BAD=$(comm -23 pub.txt allow.txt || true)
+          if [ -n "$BAD" ]; then
+            echo "::warning::공개 저장소에 허용하지 않은 파일이 있습니다 — 키나 코드가 새지 않았는지 확인하세요:"
+            echo "$BAD" | sed 's/^/  ::warning::  /'
+          else
+            echo "✅ 빌드 파일뿐입니다. 키·코드 누출 없음."
+          fi
+          # 이름만으로도 수상한 것은 따로 크게 알린다.
+          if grep -qiE '\.(jks|keystore|pem|p12|b64)$|secret|token|password' pub.txt; then
+            echo "::error::공개 저장소에 키처럼 보이는 파일 이름이 있습니다. 즉시 확인하세요."
+          fi

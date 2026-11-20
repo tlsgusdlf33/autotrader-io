@@ -1,0 +1,35 @@
+# 빌드가 **성공하면** 그 실행의 공개 로그를 지운다
+#
+# 왜
+#   이 저장소는 공개다. 실행 로그도 누구나 읽는다. 로그에 비밀값이 찍히지
+#   않게 만들어 두었지만(::add-mask::), 남겨 둘 이유가 없는 것은 지우는 게
+#   맞다 — 실수 하나가 영구 공개로 남는 자리다.
+#
+# ⚠️ **실패한 실행은 지우지 않는다.** 지우면 왜 깨졌는지 알 길이 없다.
+#    실제로 로그가 있어서 403(토큰 권한) 원인을 찾았다.
+# ⚠️ 실행 중에는 자기 로그를 못 지운다. 그래서 workflow_run 으로 **끝난 뒤**
+#    따로 돈다.
+name: 성공한 빌드의 공개 로그 지우기
+
+on:
+  workflow_run:
+    workflows: ["Build APK", "업로드 키 만들기 / 다시 만들기"]
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  clean:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 로그 지우기
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN: ${{ github.event.workflow_run.id }}
+        run: |
+          set -e
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/runs/$RUN/logs" \
+            && echo "실행 $RUN 의 로그를 지웠습니다." \
+            || echo "::warning::실행 $RUN 의 로그를 지우지 못했습니다(이미 없을 수 있습니다)."

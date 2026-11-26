@@ -16,8 +16,6 @@ name: Build APK
 #      기본 토큰으로 떨어지게 둔다.
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '10 21 * * 0-4'
 
 env:
   SRC_REPO: tlsgusdlf33/autotrader

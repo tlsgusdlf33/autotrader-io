@@ -572,6 +572,10 @@ jobs:
             *) echo "::error::INTERSTITIAL_ID 에 슬래시(/)가 없습니다. 앱 ID를 잘못 넣으신 것 같습니다: $INTER_ID"; exit 1;;
           esac
           sed -i "s|<string name=\"admob_interstitial_id\">[^<]*</string>|<string name=\"admob_interstitial_id\">$INTER_ID</string>|" "$STR"
+          # 네이티브 광고(로딩 화면 · 모든 화면). 비어 있으면 그 칸을 아예
+          # 띄우지 않는다 — 빈 칸이 남으면 화면만 좁아진다.
+          NATIVE_ID=$(grep -E '^NATIVE_ID=' admob_signal.txt | head -1 | cut -d= -f2- | tr -d ' \r')
+          sed -i "s|<string name=\"admob_native_id\">[^<]*</string>|<string name=\"admob_native_id\">$NATIVE_ID</string>|" "$STR"
           if [ -z "$INTER_ID" ]; then
             echo "::warning::전면 광고 ID 가 비어 있습니다 — 전면 광고는 뜨지 않습니다(기능은 정상)."
           fi
@@ -579,7 +583,7 @@ jobs:
           echo "적용된 광고 ID:"
           # ⚠️ 전면 광고도 같이 찍는다. 예전엔 app/banner 만 찍어서, 전면 광고에
           #    엉뚱한 단위(앱 오프닝) ID 를 넣었는데도 로그만 봐서는 알 수 없었다.
-          grep -E 'admob_(app|banner|interstitial)_id' "$STR"
+          grep -E 'admob_(app|banner|interstitial|native)_id' "$STR"
           case "$APP_ID" in
             ca-app-pub-3940256099942544*) echo "::warning::아직 구글 테스트 ID입니다 — 수익이 발생하지 않습니다.";;
           esac
